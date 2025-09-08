@@ -1,4 +1,4 @@
-name: Cek Semua Config Aktif Pintar
+name: Cek Semua Config Aktif & Master TXT
 
 on:
   workflow_dispatch:
@@ -12,11 +12,14 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y netcat curl jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y netcat-openbsd curl jq
 
-      - name: Cek config aktif
+      - name: Cek config aktif dan buat master TXT
         run: |
           mkdir -p output/aktif
+          > output/aktif/all_aktif.txt
 
           while read url; do
             [[ -z "$url" ]] && continue
@@ -24,7 +27,7 @@ jobs:
             tmpfile=$(mktemp)
             curl -s "$url" -o "$tmpfile"
 
-            # Jika file base64, decode dulu
+            # Decode base64 jika perlu
             if grep -qE '^[A-Za-z0-9+/]+=*$' "$tmpfile"; then
               tmp_dec=$(mktemp)
               base64 --decode "$tmpfile" > "$tmp_dec" 2>/dev/null || cp "$tmpfile" "$tmp_dec"
@@ -32,13 +35,15 @@ jobs:
               tmp_dec="$tmpfile"
             fi
 
-            file_name=$(echo $url | awk -F/ '{print $3}')
+            # Nama file output per URL, berekstensi .txt
+            file_name=$(echo $url | awk -F/ '{print $3}').txt
             output_file="output/aktif/$file_name"
             > "$output_file"
 
             while read line; do
               [[ -z "$line" ]] && continue
 
+              # Parsing VMess/VLess/Trojan/SS
               if [[ "$line" == vmess:* ]]; then
                 json=$(echo $line | sed 's|^vmess://||' | base64 --decode 2>/dev/null)
                 host=$(echo $json | jq -r '.add')
@@ -58,8 +63,10 @@ jobs:
                 port=$(echo $line | cut -d':' -f2)
               fi
 
+              # Cek koneksi TCP
               if [[ -n "$host" && -n "$port" ]] && nc -z -w5 $host $port 2>/dev/null; then
                 echo "$line" >> "$output_file"
+                echo "$line" >> output/aktif/all_aktif.txt
               fi
 
             done < "$tmp_dec"
@@ -75,5 +82,5 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add output/aktif/
-          git commit -m "Update aktif config" || echo "No changes"
+          git commit -m "Update semua akun aktif dan all_aktif.txt" || echo "No changes"
           git push
