@@ -1,41 +1,42 @@
-name: Proxy Checker
+name: Proxy Checker Full
 
 on:
   push:
     paths:
       - 'sub_urls.txt'  # Run otomatis jika file ini diubah
   schedule:
-    - cron: '0 0 * * *'  # Run harian jam 00:00 UTC (bisa diubah)
-  workflow_dispatch:  # Tombol manual run di UI
+    - cron: '0 0 * * *'  # Run harian jam 00:00 UTC (ubah jika perlu, misalnya '0 12 * * *' untuk siang)
+  workflow_dispatch:  # Tombol manual run di UI GitHub
 
 jobs:
   check-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Hindari timeout jika banyak links
+    timeout-minutes: 30  # Hindari timeout jika banyak links/configs
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Setup Go
+    - name: Setup Go (kompatibel dengan LiteSpeedTest v0.15.0)
       uses: actions/setup-go@v4
       with:
-        go-version: '1.21'  # Kompatibel dengan LiteSpeedTest
+        go-version: '1.21'  # Versi stabil; bisa turun ke 1.19 jika issue
 
-    - name: Clone dan build LiteSpeedTest
+    - name: Clone dan build LiteSpeedTest (dengan fix go.sum error)
       run: |
-        git clone https://github.com/xxf098/LiteSpeedTest.git
+        git clone --depth 1 --branch v0.15.0 https://github.com/xxf098/LiteSpeedTest.git
         cd LiteSpeedTest
-        go mod download
+        go mod download  # Fetch semua deps termasuk golang.org/x/image/font/basicfont
+        go mod tidy      # Generate/update go.sum untuk missing entries
         go build -o lite .
         cd ..
-        ./LiteSpeedTest/lite --version  # Verifikasi build
+        ./LiteSpeedTest/lite --version  # Verifikasi build sukses (harus output versi 0.15.0)
 
-    - name: Buat config.json (berdasarkan doc LiteSpeedTest)
+    - name: Buat config.json full (berdasarkan doc LiteSpeedTest v0.15.0)
       run: |
         cat > config.json << EOF
         {
-          "group": "Proxy Test",
+          "group": "Proxy Test Full",
           "speedtestMode": "all",
           "pingMethod": "googleping",
           "sortMethod": "rspeed",
@@ -45,69 +46,109 @@ jobs:
           "timeout": 5,
           "language": "en",
           "unique": true,
-          "outputMode": 4
+          "outputMode": 4,
+          "theme": "rainbow"
         }
         EOF
+        # Verifikasi config
+        cat config.json
 
-    - name: Install helpers (jq, curl, dos2unix)
+    - name: Install helpers (jq, curl, dos2unix untuk TXT handling)
       run: |
         sudo apt-get update && sudo apt-get install -y jq curl dos2unix
 
-    - name: Baca sub_urls.txt dan test semua links (termasuk .txt)
+    - name: Baca sub_urls.txt dan test semua links/configs (full handling: URL, .txt, direct)
       run: |
         touch active_configs.txt
         touch failed.txt
-
-        # Filter hanya valid lines (URL atau config)
-        while IFS= read -r line; do
-          if [ -n "$line" ]; then
-            if [[ "$line" =~ ^http ]]; then
-              # Test sub link/URL/.txt
-              echo "Testing link: $line"
-              jq ".subscription = \"$line\"" config.json > temp.json && mv temp.json config.json
-              ./LiteSpeedTest/lite --config config.json --test > temp_output.txt 2>&1
-
-              # Ekstrak aktif dari output TXT (mode 4: lines dengan config OK)
-              grep -E "(OK|success).*(vmess|vless|trojan|ss|ssr)://" temp_output.txt | sed 's/.*\(vmess:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(vless:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(trojan:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(ss:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(ssr:\/\/[^ ]*\).*/\1/g' >> active_configs.txt
-
-              # Log failed jika no output
-              if ! grep -q "OK\|success" temp_output.txt; then
-                echo "Failed: $line" >> failed.txt
-              fi
-            elif [[ "$line" =~ ^(vmess|vless|trojan|ss|ssr):// ]]; then
-              # Test single config
-              echo "Testing direct config: $line"
-              ./LiteSpeedTest/lite --test "$line" > temp_output_single.txt 2>&1
-              if grep -q "OK\|success" temp_output_single.txt; then
-                echo "$line" >> active_configs.txt
-              else
-                echo "Failed direct: $line" >> failed.txt
+        
+        # Loop setiap baris di sub_urls.txt
+        while IFS= read -r line || [[ -n "$line" ]]; do
+          # Skip empty lines
+          if [ -z "$line" ]; then continue; fi
+          
+          echo "Processing line: $line"
+          
+          if [[ "$line" =~ ^http ]]; then
+            # Handle sub URL atau link .txt
+            echo "Testing sub link/TXT: $line"
+            # Fetch jika .txt untuk log (opsional)
+            if [[ "$line" == *.txt ]]; then
+              curl -s -f "$line" > temp_fetched.txt || echo "Failed to fetch TXT: $line" >> failed.txt
+              if [ -s temp_fetched.txt ]; then
+                dos2unix temp_fetched.txt  # Fix line endings jika Windows TXT
+                echo "Fetched TXT: $(wc -l < temp_fetched.txt) lines"
               fi
             fi
+            
+            # Update config dengan subscription URL (LiteSpeedTest fetch/parse otomatis)
+            jq ".subscription = \"$line\"" config.json > temp.json && mv temp.json config.json
+            
+            # Run test full
+            ./LiteSpeedTest/lite --config config.json --test > temp_output.txt 2>&1
+            
+            # Filter aktif: Ekstrak config dengan "OK" atau "success" dari output TXT (mode 4)
+            # Regex adaptasi untuk vmess://, vless://, trojan://, ss://, ssr://
+            grep -E "(OK|success).*(vmess|vless|trojan|ss|ssr)://" temp_output.txt | \
+            sed -E 's/.*(vmess:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(vless:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(trojan:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(ss:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(ssr:\/\/[^ ]+).*/\1/g' >> active_configs.txt
+            
+            # Log failed jika no active dari output ini
+            if ! grep -q "(OK|success)" temp_output.txt; then
+              echo "Failed link: $line (check temp_output.txt for details)" >> failed.txt
+            fi
+            
+          elif [[ "$line" =~ ^(vmess|vless|trojan|ss|ssr):// ]]; then
+            # Handle direct config (single test)
+            echo "Testing direct config: $line"
+            ./LiteSpeedTest/lite --test "$line" > temp_output_single.txt 2>&1
+            if grep -q "(OK|success)" temp_output_single.txt; then
+              echo "$line" >> active_configs.txt
+              echo "Active direct: $line"
+            else
+              echo "Failed direct: $line" >> failed.txt
+            fi
+          else
+            echo "Skipped invalid line: $line" >> failed.txt
           fi
+          
+          echo "" >> active_configs.txt  # Separator antar test
         done < sub_urls.txt
-
-        # Clean: Hapus duplikat, sort, hilangkan kosong
-        if [ -f active_configs.txt ]; then
-          sort -u active_configs.txt | grep -v "^$" > active_clean.txt && mv active_clean.txt active_configs.txt
-          echo "Active configs disimpan. Jumlah: $(wc -l < active_configs.txt)"
-          echo "Preview:" && head -5 active_configs.txt
+        
+        # Clean up active_configs.txt: Unique, sort, hilang kosong, tambah header
+        if [ -f active_configs.txt ] && [ -s active_configs.txt ]; then
+          echo "# Active Proxy Configs (Tested on $(date)) - LiteSpeedTest v0.15.0" > active_header.txt
+          sort -u active_configs.txt | grep -v "^$" | tail -n +2 >> active_header.txt  # Skip first empty if any
+          mv active_header.txt active_configs.txt
+          echo "Active configs saved. Jumlah: $(wc -l < active_configs.txt)"
+          echo "Preview (top 5):"
+          head -5 active_configs.txt
+        else
+          echo "# No active configs found on $(date)" > active_configs.txt
+        fi
+        
+        # Log failed
+        if [ -f failed.txt ] && [ -s failed.txt ]; then
+          echo "Failed items:"
+          cat failed.txt
+        else
+          echo "No failures."
         fi
 
-        if [ -f failed.txt ]; then
-          echo "Failed:" && cat failed.txt
-        fi
-
-    - name: Commit dan push active_configs.txt
+    - name: Commit dan push hasil (active_configs.txt dan failed.txt)
       run: |
         git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
+        git config --local user.name "GitHub Action Bot"
         git add active_configs.txt failed.txt
         if git diff --staged --quiet; then
-          echo "No changes to commit"
+          echo "No changes to commit (no new actives)"
         else
-          git commit -m "Update active_configs.txt dari checker ($(date +%Y-%m-%d))"
+          git commit -m "Update active_configs.txt dari full checker ($(date +%Y-%m-%d %H:%M UTC)) - LiteSpeedTest v0.15.0"
           git push
+          echo "Committed and pushed successfully!"
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
