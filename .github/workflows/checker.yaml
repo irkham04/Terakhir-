@@ -1,0 +1,113 @@
+name: Proxy Checker
+
+on:
+  push:
+    paths:
+      - 'sub_urls.txt'  # Run otomatis jika file ini diubah
+  schedule:
+    - cron: '0 0 * * *'  # Run harian jam 00:00 UTC (bisa diubah)
+  workflow_dispatch:  # Tombol manual run di UI
+
+jobs:
+  check-proxies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Hindari timeout jika banyak links
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'  # Kompatibel dengan LiteSpeedTest
+
+    - name: Clone dan build LiteSpeedTest
+      run: |
+        git clone https://github.com/xxf098/LiteSpeedTest.git
+        cd LiteSpeedTest
+        go mod download
+        go build -o lite .
+        cd ..
+        ./LiteSpeedTest/lite --version  # Verifikasi build
+
+    - name: Buat config.json (berdasarkan doc LiteSpeedTest)
+      run: |
+        cat > config.json << EOF
+        {
+          "group": "Proxy Test",
+          "speedtestMode": "all",
+          "pingMethod": "googleping",
+          "sortMethod": "rspeed",
+          "concurrency": 10,
+          "testMode": 2,
+          "subscription": "",
+          "timeout": 5,
+          "language": "en",
+          "unique": true,
+          "outputMode": 4
+        }
+        EOF
+
+    - name: Install helpers (jq, curl, dos2unix)
+      run: |
+        sudo apt-get update && sudo apt-get install -y jq curl dos2unix
+
+    - name: Baca sub_urls.txt dan test semua links (termasuk .txt)
+      run: |
+        touch active_configs.txt
+        touch failed.txt
+
+        # Filter hanya valid lines (URL atau config)
+        while IFS= read -r line; do
+          if [ -n "$line" ]; then
+            if [[ "$line" =~ ^http ]]; then
+              # Test sub link/URL/.txt
+              echo "Testing link: $line"
+              jq ".subscription = \"$line\"" config.json > temp.json && mv temp.json config.json
+              ./LiteSpeedTest/lite --config config.json --test > temp_output.txt 2>&1
+
+              # Ekstrak aktif dari output TXT (mode 4: lines dengan config OK)
+              grep -E "(OK|success).*(vmess|vless|trojan|ss|ssr)://" temp_output.txt | sed 's/.*\(vmess:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(vless:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(trojan:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(ss:\/\/[^ ]*\).*/\1/g' | sed 's/.*\(ssr:\/\/[^ ]*\).*/\1/g' >> active_configs.txt
+
+              # Log failed jika no output
+              if ! grep -q "OK\|success" temp_output.txt; then
+                echo "Failed: $line" >> failed.txt
+              fi
+            elif [[ "$line" =~ ^(vmess|vless|trojan|ss|ssr):// ]]; then
+              # Test single config
+              echo "Testing direct config: $line"
+              ./LiteSpeedTest/lite --test "$line" > temp_output_single.txt 2>&1
+              if grep -q "OK\|success" temp_output_single.txt; then
+                echo "$line" >> active_configs.txt
+              else
+                echo "Failed direct: $line" >> failed.txt
+              fi
+            fi
+          fi
+        done < sub_urls.txt
+
+        # Clean: Hapus duplikat, sort, hilangkan kosong
+        if [ -f active_configs.txt ]; then
+          sort -u active_configs.txt | grep -v "^$" > active_clean.txt && mv active_clean.txt active_configs.txt
+          echo "Active configs disimpan. Jumlah: $(wc -l < active_configs.txt)"
+          echo "Preview:" && head -5 active_configs.txt
+        fi
+
+        if [ -f failed.txt ]; then
+          echo "Failed:" && cat failed.txt
+        fi
+
+    - name: Commit dan push active_configs.txt
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add active_configs.txt failed.txt
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update active_configs.txt dari checker ($(date +%Y-%m-%d))"
+          git push
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
