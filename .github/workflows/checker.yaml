@@ -1,177 +1,81 @@
-name: Proxy Checker Robust Fix
+- name: Baca sub_urls.txt dan test (fix: cek HTTP status)
+    run: |
+      touch active_configs.txt
+      touch failed.txt
 
-on:
-  push:
-    paths:
-      - 'sub_urls.txt'
-  schedule:
-    - cron: '0 0 * * *'  # Harian UTC
-  workflow_dispatch:
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [ -z "$line" ]; then continue; fi
 
-jobs:
-  check-proxies:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+        echo "=== Processing: $line ==="
 
-    steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+        if [[ "$line" =~ ^http ]]; then
+          echo "Testing link: $line"
 
-    - name: Setup Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-
-    - name: Clone, build LiteSpeedTest, atau fallback binary
-      run: |
-        if git clone --depth 1 https://github.com/xxf098/LiteSpeedTest.git; then
-          cd LiteSpeedTest
-          go mod download
-          go mod tidy
-          if go build -o lite .; then
-            cd ..
-            echo "Build sukses!"
-            file LiteSpeedTest/lite  # Konfirmasi binary
-            # Test sederhana tool (contoh dari doc)
-            timeout 10s ./LiteSpeedTest/lite --test https://raw.githubusercontent.com/freefq/free/master/v2 > test_simple.txt 2>&1 || true
-            echo "Simple test output preview:" && head -3 test_simple.txt
-          else
-            echo "Build gagal, fallback binary"
-            cd ..
-            wget https://github.com/xxf098/LiteSpeedTest/releases/download/v0.15.0/lite-linux-amd64-v0.15.0.gz
-            gunzip lite-linux-amd64-v0.15.0.gz
-            mv lite-linux-amd64-v0.15.0 lite
-            chmod +x lite
-            echo "Fallback ready!"
-            file lite
-            timeout 10s ./lite --test https://raw.githubusercontent.com/freefq/free/master/v2 > test_simple.txt 2>&1 || true
-            echo "Simple test preview:" && head -3 test_simple.txt
+          # Cek HTTP status dulu
+          http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$line")
+          echo "HTTP Status: $http_status"
+          if [[ "$http_status" != "200" && "$http_status" != "301" && "$http_status" != "302" ]]; then
+            echo "Failed: $line - Invalid HTTP status $http_status" >> failed.txt
+            continue
           fi
-        else
-          echo "Clone gagal, fallback"
-          wget https://github.com/xxf098/LiteSpeedTest/releases/download/v0.15.0/lite-linux-amd64-v0.15.0.gz
-          gunzip lite-linux-amd64-v0.15.0.gz
-          mv lite-linux-amd64-v0.15.0 lite
-          chmod +x lite
-          echo "Fallback ready!"
-          file lite
-        fi
-        mv LiteSpeedTest/lite . || true  # Pindah ke root
 
-    - name: Buat config.json (kosongkan subscription, biar --test handle)
-      run: |
-        cat > config.json << EOF
-        {
-          "group": "Proxy Test Robust",
-          "speedtestMode": "all",
-          "pingMethod": "googleping",
-          "sortMethod": "rspeed",
-          "concurrency": 5,
-          "testMode": 2,
-          "subscription": "",
-          "timeout": 10,
-          "language": "en",
-          "unique": true,
-          "outputMode": 4,
-          "theme": "rainbow"
-        }
-        EOF
-        echo "Config ready (subscription kosong untuk --test direct):"
-        cat config.json
-
-    - name: Install helpers
-      run: |
-        sudo apt-get update && sudo apt-get install -y jq curl dos2unix
-
-    - name: Baca sub_urls.txt dan test (fix: --test dengan direct URL)
-      run: |
-        touch active_configs.txt
-        touch failed.txt
-        
-        while IFS= read -r line || [[ -n "$line" ]]; do
-          if [ -z "$line" ]; then continue; fi
-          
-          echo "=== Processing: $line ==="
-          
-          if [[ "$line" =~ ^http ]]; then
-            echo "Testing link: $line"
-            
-            if [[ "$line" == *.txt ]]; then
-              if curl -s -f "$line" > temp_fetched.txt; then
-                dos2unix temp_fetched.txt
-                echo "Fetched TXT: $(wc -l < temp_fetched.txt) lines"
-                # Jika TXT, test sebagai file lokal (LiteSpeedTest support file input via --test)
-                timeout 30s ./lite --config config.json --test temp_fetched.txt > temp_output.txt 2>&1 || echo "Timeout fetch: $line" >> failed.txt
-              else
-                echo "Gagal fetch TXT: $line" >> failed.txt
-                continue
-              fi
+          if [[ "$line" == *.txt ]]; then
+            if curl -s -f "$line" > temp_fetched.txt; then
+              dos2unix temp_fetched.txt
+              echo "Fetched TXT: $(wc -l < temp_fetched.txt) lines"
+              timeout 30s ./lite --config config.json --test temp_fetched.txt > temp_output.txt 2>&1 || echo "Timeout TXT: $line" >> failed.txt
             else
-              # Direct URL: --test dengan URL, config untuk settings
-              timeout 30s ./lite --config config.json --test "$line" > temp_output.txt 2>&1 || echo "Timeout/Exit 1 on $line" >> failed.txt
-            fi
-            
-            # Log full output untuk debug (lihat di Actions log)
-            echo "Full temp_output.txt for $line:"
-            cat temp_output.txt
-            
-            # Filter aktif (update regex: cari "OK" atau "success" + URI; sesuaikan jika output beda)
-            if grep -q "OK\|success\|IsOk" temp_output.txt; then
-              awk '/(OK|success|IsOk)/ && /(vmess|vless|trojan|ss|ssr):\/\// {print $0}' temp_output.txt | \
-              sed -E 's/.*(vmess:\/\/[^ ]+).*/\1/g' | \
-              sed -E 's/.*(vless:\/\/[^ ]+).*/\1/g' | \
-              sed -E 's/.*(trojan:\/\/[^ ]+).*/\1/g' | \
-              sed -E 's/.*(ss:\/\/[^ ]+).*/\1/g' | \
-              sed -E 's/.*(ssr:\/\/[^ ]+).*/\1/g' | \
-              grep -v "^$" >> active_configs.txt
-              echo "Found active from $line"
-            else
-              echo "No OK/success in output for $line (possible empty sub or error). Details above." >> failed.txt
-            fi
-            
-          elif [[ "$line" =~ ^(vmess|vless|trojan|ss|ssr):// ]]; then
-            echo "Testing direct: $line"
-            timeout 10s ./lite --config config.json --test "$line" > temp_output_single.txt 2>&1
-            echo "Direct output:" && cat temp_output_single.txt
-            if grep -q "OK\|success\|IsOk" temp_output_single.txt; then
-              echo "$line" >> active_configs.txt
-            else
-              echo "Failed direct: $line" >> failed.txt
+              echo "Gagal fetch TXT: $line" >> failed.txt
+              continue
             fi
           else
-            echo "Invalid: $line" >> failed.txt
+            timeout 30s ./lite --config config.json --test "$line" > temp_output.txt 2>&1 || echo "Timeout/Exit 1: $line" >> failed.txt
           fi
-          
-          echo "" >> active_configs.txt
-        done < sub_urls.txt
-        
-        # Clean active
-        if [ -s active_configs.txt ]; then
-          echo "# Active Proxies - $(date) - LiteSpeedTest Robust" > header.txt
-          echo "# Only OK nodes: VMess/VLESS/Trojan/SS" >> header.txt
-          sort -u active_configs.txt | grep -v "^$" | grep -E "(vmess|vless|trojan|ss|ssr)://" >> header.txt
-          mv header.txt active_configs.txt
-          echo "Active count: $(wc -l < active_configs.txt)"
-          head -10 active_configs.txt
+
+          echo "Full output for $line:"
+          cat temp_output.txt
+
+          if grep -q "OK\|success\|IsOk" temp_output.txt; then
+            awk '/(OK|success|IsOk)/ && /(vmess|vless|trojan|ss|ssr):\/\// {print $0}' temp_output.txt | \
+            sed -E 's/.*(vmess:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(vless:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(trojan:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(ss:\/\/[^ ]+).*/\1/g' | \
+            sed -E 's/.*(ssr:\/\/[^ ]+).*/\1/g' | \
+            grep -v "^$" >> active_configs.txt
+            echo "Found active from $line"
+          else
+            echo "No valid nodes for $line - $(grep -i error temp_output.txt | head -1)" >> failed.txt
+          fi
+
+        elif [[ "$line" =~ ^(vmess|vless|trojan|ss|ssr):// ]]; then
+          echo "Testing direct: $line"
+          timeout 10s ./lite --config config.json --test "$line" > temp_output_single.txt 2>&1
+          echo "Direct output:" && cat temp_output_single.txt
+          if grep -q "OK\|success\|IsOk" temp_output_single.txt; then
+            echo "$line" >> active_configs.txt
+          else
+            echo "Failed direct: $line" >> failed.txt
+          fi
         else
-          echo "# No actives - $(date)" > active_configs.txt
-        fi
-        
-        if [ -s failed.txt ]; then
-          echo "Failed:"
-          cat failed.txt
+          echo "Invalid: $line" >> failed.txt
         fi
 
-    - name: Commit hasil
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action Robust"
-        git add active_configs.txt failed.txt
-        if ! git diff --staged --quiet; then
-          git commit -m "Update active_configs.txt - Fixed test command ($(date +%Y-%m-%d %H:%M UTC))"
-          git push
-        else
-          echo "No changes"
-        fi
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        echo "" >> active_configs.txt
+      done < sub_urls.txt
+
+      if [ -s active_configs.txt ]; then
+        echo "# Active Proxies - $(date) - LiteSpeedTest" > header.txt
+        echo "# Only OK nodes: VMess/VLESS/Trojan/SS" >> header.txt
+        sort -u active_configs.txt | grep -v "^$" | grep -E "(vmess|vless|trojan|ss|ssr)://" >> header.txt
+        mv header.txt active_configs.txt
+        echo "Active count: $(wc -l < active_configs.txt)"
+        head -10 active_configs.txt
+      else
+        echo "# No actives - $(date)" > active_configs.txt
+      fi
+
+      if [ -s failed.txt ]; then
+        echo "Failed:"
+        cat failed.txt
+      fi
