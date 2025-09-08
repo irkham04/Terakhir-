@@ -1,81 +1,79 @@
-- name: Baca sub_urls.txt dan test (fix: cek HTTP status)
-    run: |
-      touch active_configs.txt
-      touch failed.txt
+name: Cek Semua Config Aktif Pintar
 
-      while IFS= read -r line || [[ -n "$line" ]]; do
-        if [ -z "$line" ]; then continue; fi
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
 
-        echo "=== Processing: $line ==="
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
 
-        if [[ "$line" =~ ^http ]]; then
-          echo "Testing link: $line"
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y netcat curl jq
 
-          # Cek HTTP status dulu
-          http_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$line")
-          echo "HTTP Status: $http_status"
-          if [[ "$http_status" != "200" && "$http_status" != "301" && "$http_status" != "302" ]]; then
-            echo "Failed: $line - Invalid HTTP status $http_status" >> failed.txt
-            continue
-          fi
+      - name: Cek config aktif
+        run: |
+          mkdir -p output/aktif
 
-          if [[ "$line" == *.txt ]]; then
-            if curl -s -f "$line" > temp_fetched.txt; then
-              dos2unix temp_fetched.txt
-              echo "Fetched TXT: $(wc -l < temp_fetched.txt) lines"
-              timeout 30s ./lite --config config.json --test temp_fetched.txt > temp_output.txt 2>&1 || echo "Timeout TXT: $line" >> failed.txt
+          while read url; do
+            [[ -z "$url" ]] && continue
+            echo "Download $url ..."
+            tmpfile=$(mktemp)
+            curl -s "$url" -o "$tmpfile"
+
+            # Jika file base64, decode dulu
+            if grep -qE '^[A-Za-z0-9+/]+=*$' "$tmpfile"; then
+              tmp_dec=$(mktemp)
+              base64 --decode "$tmpfile" > "$tmp_dec" 2>/dev/null || cp "$tmpfile" "$tmp_dec"
             else
-              echo "Gagal fetch TXT: $line" >> failed.txt
-              continue
+              tmp_dec="$tmpfile"
             fi
-          else
-            timeout 30s ./lite --config config.json --test "$line" > temp_output.txt 2>&1 || echo "Timeout/Exit 1: $line" >> failed.txt
-          fi
 
-          echo "Full output for $line:"
-          cat temp_output.txt
+            file_name=$(echo $url | awk -F/ '{print $3}')
+            output_file="output/aktif/$file_name"
+            > "$output_file"
 
-          if grep -q "OK\|success\|IsOk" temp_output.txt; then
-            awk '/(OK|success|IsOk)/ && /(vmess|vless|trojan|ss|ssr):\/\// {print $0}' temp_output.txt | \
-            sed -E 's/.*(vmess:\/\/[^ ]+).*/\1/g' | \
-            sed -E 's/.*(vless:\/\/[^ ]+).*/\1/g' | \
-            sed -E 's/.*(trojan:\/\/[^ ]+).*/\1/g' | \
-            sed -E 's/.*(ss:\/\/[^ ]+).*/\1/g' | \
-            sed -E 's/.*(ssr:\/\/[^ ]+).*/\1/g' | \
-            grep -v "^$" >> active_configs.txt
-            echo "Found active from $line"
-          else
-            echo "No valid nodes for $line - $(grep -i error temp_output.txt | head -1)" >> failed.txt
-          fi
+            while read line; do
+              [[ -z "$line" ]] && continue
 
-        elif [[ "$line" =~ ^(vmess|vless|trojan|ss|ssr):// ]]; then
-          echo "Testing direct: $line"
-          timeout 10s ./lite --config config.json --test "$line" > temp_output_single.txt 2>&1
-          echo "Direct output:" && cat temp_output_single.txt
-          if grep -q "OK\|success\|IsOk" temp_output_single.txt; then
-            echo "$line" >> active_configs.txt
-          else
-            echo "Failed direct: $line" >> failed.txt
-          fi
-        else
-          echo "Invalid: $line" >> failed.txt
-        fi
+              if [[ "$line" == vmess:* ]]; then
+                json=$(echo $line | sed 's|^vmess://||' | base64 --decode 2>/dev/null)
+                host=$(echo $json | jq -r '.add')
+                port=$(echo $json | jq -r '.port')
+              elif [[ "$line" == vless:* ]]; then
+                host=$(echo $line | sed -E 's|vless://[^@]+@([^:]+):([0-9]+).*|\1|')
+                port=$(echo $line | sed -E 's|vless://[^@]+@([^:]+):([0-9]+).*|\2|')
+              elif [[ "$line" == trojan:* ]]; then
+                host=$(echo $line | sed -E 's|trojan://[^@]+@([^:]+):([0-9]+).*|\1|')
+                port=$(echo $line | sed -E 's|trojan://[^@]+@([^:]+):([0-9]+).*|\2|')
+              elif [[ "$line" == ss:* ]]; then
+                ss_dec=$(echo $line | sed 's|ss://||' | base64 --decode 2>/dev/null)
+                host=$(echo $ss_dec | cut -d':' -f1)
+                port=$(echo $ss_dec | cut -d':' -f2)
+              else
+                host=$(echo $line | cut -d':' -f1)
+                port=$(echo $line | cut -d':' -f2)
+              fi
 
-        echo "" >> active_configs.txt
-      done < sub_urls.txt
+              if [[ -n "$host" && -n "$port" ]] && nc -z -w5 $host $port 2>/dev/null; then
+                echo "$line" >> "$output_file"
+              fi
 
-      if [ -s active_configs.txt ]; then
-        echo "# Active Proxies - $(date) - LiteSpeedTest" > header.txt
-        echo "# Only OK nodes: VMess/VLESS/Trojan/SS" >> header.txt
-        sort -u active_configs.txt | grep -v "^$" | grep -E "(vmess|vless|trojan|ss|ssr)://" >> header.txt
-        mv header.txt active_configs.txt
-        echo "Active count: $(wc -l < active_configs.txt)"
-        head -10 active_configs.txt
-      else
-        echo "# No actives - $(date)" > active_configs.txt
-      fi
+            done < "$tmp_dec"
 
-      if [ -s failed.txt ]; then
-        echo "Failed:"
-        cat failed.txt
-      fi
+            echo "$file_name: $(wc -l < "$output_file") aktif"
+            rm "$tmpfile" || true
+            [[ "$tmp_dec" != "$tmpfile" ]] && rm "$tmp_dec" || true
+
+          done < sub_urls.txt
+
+      - name: Commit hasil aktif
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add output/aktif/
+          git commit -m "Update aktif config" || echo "No changes"
+          git push
