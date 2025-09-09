@@ -1,4 +1,4 @@
-name: Cek Akun Aktif V2RayNG
+name: Cek Akun Aktif Besar
 
 on:
   workflow_dispatch:
@@ -11,97 +11,77 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          persist-credentials: false  # penting agar bisa push pakai PAT
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y netcat-openbsd curl jq git
+          sudo apt-get install -y netcat-openbsd curl jq git coreutils
 
-      - name: Cek config aktif & buat output
+      - name: Download file besar
+        run: |
+          mkdir -p input
+          curl -L --retry 5 --max-time 600 -o input/All_Configs_Sub.txt https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt
+
+      - name: Split file menjadi chunk
+        run: |
+          mkdir -p input/chunks
+          split -l 1000 input/All_Configs_Sub.txt input/chunks/chunk_
+
+      - name: Cek akun aktif per chunk
         run: |
           mkdir -p output/aktif
           > output/aktif/all_aktif.txt
           echo "[]" > output/aktif/all_aktif.json
 
-          while read url; do
-            [[ -z "$url" ]] && continue
-            echo "Download $url ..."
-            tmpfile=$(mktemp)
-            curl -s "$url" -o "$tmpfile"
+          for f in input/chunks/*; do
+            echo "Processing $f ..."
+            cat "$f" | xargs -n1 -P10 -I {} bash -c '
+              line="{}"
+              [[ -z "$line" ]] && exit 0
 
-            if grep -qE '^[A-Za-z0-9+/]+=*$' "$tmpfile"; then
-              tmp_dec=$(mktemp)
-              base64 --decode "$tmpfile" > "$tmp_dec" 2>/dev/null || cp "$tmpfile" "$tmp_dec"
-            else
-              tmp_dec="$tmpfile"
-            fi
-
-            file_name=$(echo $url | awk -F/ '{print $3}').txt
-            output_file="output/aktif/$file_name"
-            > "$output_file"
-
-            while read line; do
-              [[ -z "$line" ]] && continue
-
+              # Parsing minimal (contoh VMess/VLess/Trojan/SS)
               if [[ "$line" == vmess:* ]]; then
-                json=$(echo $line | sed 's|^vmess://||' | base64 --decode 2>/dev/null)
-                host=$(echo $json | jq -r '.add')
-                port=$(echo $json | jq -r '.port')
-                id=$(echo $json | jq -r '.id')
-                alterId=$(echo $json | jq -r '.aid')
-                net=$(echo $json | jq -r '.net')
-                type=$(echo $json | jq -r '.type')
-                path=$(echo $json | jq -r '.path')
-                tls=$(echo $json | jq -r '.tls')
+                json=$(echo $line | sed "s|^vmess://||" | base64 --decode 2>/dev/null)
+                host=$(echo $json | jq -r ".add")
+                port=$(echo $json | jq -r ".port")
                 proto="vmess"
               elif [[ "$line" == vless:* ]]; then
-                host=$(echo $line | sed -E 's|vless://[^@]+@([^:]+):([0-9]+).*|\1|')
-                port=$(echo $line | sed -E 's|vless://[^@]+@([^:]+):([0-9]+).*|\2|')
-                id=$(echo $line | sed -E 's|vless://([^@]+)@.*|\1|')
+                host=$(echo $line | sed -E "s|vless://[^@]+@([^:]+):([0-9]+).*|\1|")
+                port=$(echo $line | sed -E "s|vless://[^@]+@([^:]+):([0-9]+).*|\2|")
                 proto="vless"
               elif [[ "$line" == trojan:* ]]; then
-                host=$(echo $line | sed -E 's|trojan://[^@]+@([^:]+):([0-9]+).*|\1|')
-                port=$(echo $line | sed -E 's|trojan://[^@]+@([^:]+):([0-9]+).*|\2|')
-                passwd=$(echo $line | sed -E 's|trojan://([^@]+)@.*|\1|')
+                host=$(echo $line | sed -E "s|trojan://[^@]+@([^:]+):([0-9]+).*|\1|")
+                port=$(echo $line | sed -E "s|trojan://[^@]+@([^:]+):([0-9]+).*|\2|")
                 proto="trojan"
               elif [[ "$line" == ss:* ]]; then
-                ss_dec=$(echo $line | sed 's|ss://||' | base64 --decode 2>/dev/null)
-                host=$(echo $ss_dec | cut -d':' -f1)
-                port=$(echo $ss_dec | cut -d':' -f2)
-                passwd=$(echo $ss_dec | cut -d':' -f3)
+                ss_dec=$(echo $line | sed "s|ss://||" | base64 --decode 2>/dev/null)
+                host=$(echo $ss_dec | cut -d":" -f1)
+                port=$(echo $ss_dec | cut -d":" -f2)
                 proto="ss"
               else
-                host=$(echo $line | cut -d':' -f1)
-                port=$(echo $line | cut -d':' -f2)
+                host=$(echo $line | cut -d":" -f1)
+                port=$(echo $line | cut -d":" -f2)
                 proto="unknown"
               fi
 
+              # Cek koneksi TCP
               if [[ -n "$host" && -n "$port" ]] && nc -z -w5 $host $port 2>/dev/null; then
-                echo "$line" >> "$output_file"
                 echo "$line" >> output/aktif/all_aktif.txt
-
+                # Append ke JSON master
                 jq --arg proto "$proto" --arg host "$host" --arg port "$port" \
-                   --arg id "${id:-}" --arg alterId "${alterId:-}" \
-                   --arg net "${net:-}" --arg type "${type:-}" --arg path "${path:-}" \
-                   --arg tls "${tls:-}" --arg passwd "${passwd:-}" \
-                   '. += [{"protocol":$proto,"host":$host,"port":$port,"id":$id,"alterId":$alterId,"net":$net,"type":$type,"path":$path,"tls":$tls,"passwd":$passwd}]' \
+                   '. += [{"protocol":$proto,"host":$host,"port":$port}]' \
                    output/aktif/all_aktif.json > output/aktif/tmp.json && mv output/aktif/tmp.json output/aktif/all_aktif.json
               fi
-
-            done < "$tmp_dec"
-
-            rm "$tmpfile" || true
-            [[ "$tmp_dec" != "$tmpfile" ]] && rm "$tmp_dec" || true
-
-          done < sub_urls.txt
+            '
+          done
 
       - name: Push hasil ke repo
         env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}  # PAT harus disimpan di Secrets repo
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add output/aktif/
-          git commit -m "Update akun aktif"
+          git commit -m "Update akun aktif besar"
           git push https://$GITHUB_TOKEN@github.com/${{ github.repository }} HEAD:main
