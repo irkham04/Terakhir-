@@ -99,7 +99,7 @@ jobs:
           done < sub_urls.txt
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: aktif-configs
           path: output/aktif/
