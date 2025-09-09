@@ -78,9 +78,11 @@ jobs:
           done < sub_urls.txt
 
       - name: Commit hasil aktif
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add output/aktif/
           git commit -m "Update semua akun aktif dan all_aktif.txt" || echo "No changes"
-          git push
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/irkham04/Terakhir-.git HEAD:main
