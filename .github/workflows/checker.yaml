@@ -10,11 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          persist-credentials: false  # penting agar bisa push pakai PAT
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y netcat-openbsd curl jq
+          sudo apt-get install -y netcat-openbsd curl jq git
 
       - name: Cek config aktif & buat output
         run: |
@@ -28,7 +30,6 @@ jobs:
             tmpfile=$(mktemp)
             curl -s "$url" -o "$tmpfile"
 
-            # Decode base64 jika perlu
             if grep -qE '^[A-Za-z0-9+/]+=*$' "$tmpfile"; then
               tmp_dec=$(mktemp)
               base64 --decode "$tmpfile" > "$tmp_dec" 2>/dev/null || cp "$tmpfile" "$tmp_dec"
@@ -43,7 +44,6 @@ jobs:
             while read line; do
               [[ -z "$line" ]] && continue
 
-              # Parsing VMess/VLess/Trojan/SS
               if [[ "$line" == vmess:* ]]; then
                 json=$(echo $line | sed 's|^vmess://||' | base64 --decode 2>/dev/null)
                 host=$(echo $json | jq -r '.add')
@@ -77,12 +77,10 @@ jobs:
                 proto="unknown"
               fi
 
-              # Cek koneksi TCP
               if [[ -n "$host" && -n "$port" ]] && nc -z -w5 $host $port 2>/dev/null; then
                 echo "$line" >> "$output_file"
                 echo "$line" >> output/aktif/all_aktif.txt
 
-                # Tambah ke JSON master
                 jq --arg proto "$proto" --arg host "$host" --arg port "$port" \
                    --arg id "${id:-}" --arg alterId "${alterId:-}" \
                    --arg net "${net:-}" --arg type "${type:-}" --arg path "${path:-}" \
@@ -98,8 +96,12 @@ jobs:
 
           done < sub_urls.txt
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: aktif-configs
-          path: output/aktif/
+      - name: Push hasil ke repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}  # PAT harus disimpan di Secrets repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add output/aktif/
+          git commit -m "Update akun aktif"
+          git push https://$GITHUB_TOKEN@github.com/${{ github.repository }} HEAD:main
