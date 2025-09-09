@@ -1,7 +1,7 @@
 name: Cek Akun Aktif Besar Sekali Run
 
 on:
-  workflow_dispatch:  # bisa dijalankan manual
+  workflow_dispatch:
 
 jobs:
   check:
@@ -25,7 +25,7 @@ jobs:
 
       - name: Download file besar
         run: |
-          curl -L --retry 5 --max-time 600 -o input/All_Configs_Sub.txt https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt
+          curl -L --retry 5 --max-time 1200 -o input/All_Configs_Sub.txt https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt
 
       - name: Split file menjadi chunk
         run: |
@@ -71,10 +71,13 @@ fi
 EOF
           chmod +x check_line.sh
 
-      - name: Cek akun aktif per chunk
+      - name: Cek akun aktif per chunk (serial)
         run: |
           for f in input/chunks/*; do
-            cat "$f" | xargs -n1 -P10 ./check_line.sh
+            echo "Processing $f ..."
+            while read line; do
+              bash check_line.sh "$line"
+            done < "$f"
           done
 
       - name: Push hasil ke repo
@@ -83,6 +86,6 @@ EOF
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add output/aktif/
-          git commit -m "Update akun aktif besar sekali run"
-          git push https://$GITHUB_TOKEN@github.com/${{ github.repository }} HEAD:main
+          git add output/aktif/all_aktif.*
+          git diff --cached --quiet || git commit -m "Update akun aktif besar sekali run"
+          git push -f https://$GITHUB_TOKEN@github.com/${{ github.repository }} HEAD:main
