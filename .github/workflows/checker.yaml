@@ -1,9 +1,7 @@
-name: Cek Akun Aktif Besar
+name: Cek Akun Aktif Besar Sekali Run
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'
+  workflow_dispatch:  # bisa dijalankan manual
 
 jobs:
   check:
@@ -18,62 +16,65 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y netcat-openbsd curl jq git coreutils
 
-      - name: Download file besar
-        run: |
-          mkdir -p input
-          curl -L --retry 5 --max-time 600 -o input/All_Configs_Sub.txt https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt
-
-      - name: Split file menjadi chunk
+      - name: Buat folder input/output
         run: |
           mkdir -p input/chunks
-          split -l 1000 input/All_Configs_Sub.txt input/chunks/chunk_
-
-      - name: Cek akun aktif per chunk
-        run: |
           mkdir -p output/aktif
           > output/aktif/all_aktif.txt
           echo "[]" > output/aktif/all_aktif.json
 
+      - name: Download file besar
+        run: |
+          curl -L --retry 5 --max-time 600 -o input/All_Configs_Sub.txt https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt
+
+      - name: Split file menjadi chunk
+        run: |
+          split -l 1000 input/All_Configs_Sub.txt input/chunks/chunk_
+
+      - name: Buat script cek line
+        run: |
+          cat << 'EOF' > check_line.sh
+#!/bin/bash
+line="$1"
+[[ -z "$line" ]] && exit 0
+
+if [[ "$line" == vmess:* ]]; then
+  json=$(echo "$line" | sed "s|^vmess://||" | base64 --decode 2>/dev/null)
+  host=$(echo "$json" | jq -r ".add")
+  port=$(echo "$json" | jq -r ".port")
+  proto="vmess"
+elif [[ "$line" == vless:* ]]; then
+  host=$(echo "$line" | sed -E "s|vless://[^@]+@([^:]+):([0-9]+).*|\1|")
+  port=$(echo "$line" | sed -E "s|vless://[^@]+@([^:]+):([0-9]+).*|\2|")
+  proto="vless"
+elif [[ "$line" == trojan:* ]]; then
+  host=$(echo "$line" | sed -E "s|trojan://[^@]+@([^:]+):([0-9]+).*|\1|")
+  port=$(echo "$line" | sed -E "s|trojan://[^@]+@([^:]+):([0-9]+).*|\2|")
+  proto="trojan"
+elif [[ "$line" == ss:* ]]; then
+  ss_dec=$(echo "$line" | sed "s|ss://||" | base64 --decode 2>/dev/null)
+  host=$(echo "$ss_dec" | cut -d":" -f1)
+  port=$(echo "$ss_dec" | cut -d":" -f2)
+  proto="ss"
+else
+  host=$(echo "$line" | cut -d":" -f1)
+  port=$(echo "$line" | cut -d":" -f2)
+  proto="unknown"
+fi
+
+if [[ -n "$host" && -n "$port" ]] && nc -z -w5 "$host" "$port" 2>/dev/null; then
+  echo "$line" >> output/aktif/all_aktif.txt
+  jq --arg proto "$proto" --arg host "$host" --arg port "$port" \
+     '. += [{"protocol":$proto,"host":$host,"port":$port}]' \
+     output/aktif/all_aktif.json > output/aktif/tmp.json && mv output/aktif/tmp.json output/aktif/all_aktif.json
+fi
+EOF
+          chmod +x check_line.sh
+
+      - name: Cek akun aktif per chunk
+        run: |
           for f in input/chunks/*; do
-            echo "Processing $f ..."
-            cat "$f" | xargs -n1 -P10 -I {} bash -c '
-              line="{}"
-              [[ -z "$line" ]] && exit 0
-
-              # Parsing minimal (contoh VMess/VLess/Trojan/SS)
-              if [[ "$line" == vmess:* ]]; then
-                json=$(echo $line | sed "s|^vmess://||" | base64 --decode 2>/dev/null)
-                host=$(echo $json | jq -r ".add")
-                port=$(echo $json | jq -r ".port")
-                proto="vmess"
-              elif [[ "$line" == vless:* ]]; then
-                host=$(echo $line | sed -E "s|vless://[^@]+@([^:]+):([0-9]+).*|\1|")
-                port=$(echo $line | sed -E "s|vless://[^@]+@([^:]+):([0-9]+).*|\2|")
-                proto="vless"
-              elif [[ "$line" == trojan:* ]]; then
-                host=$(echo $line | sed -E "s|trojan://[^@]+@([^:]+):([0-9]+).*|\1|")
-                port=$(echo $line | sed -E "s|trojan://[^@]+@([^:]+):([0-9]+).*|\2|")
-                proto="trojan"
-              elif [[ "$line" == ss:* ]]; then
-                ss_dec=$(echo $line | sed "s|ss://||" | base64 --decode 2>/dev/null)
-                host=$(echo $ss_dec | cut -d":" -f1)
-                port=$(echo $ss_dec | cut -d":" -f2)
-                proto="ss"
-              else
-                host=$(echo $line | cut -d":" -f1)
-                port=$(echo $line | cut -d":" -f2)
-                proto="unknown"
-              fi
-
-              # Cek koneksi TCP
-              if [[ -n "$host" && -n "$port" ]] && nc -z -w5 $host $port 2>/dev/null; then
-                echo "$line" >> output/aktif/all_aktif.txt
-                # Append ke JSON master
-                jq --arg proto "$proto" --arg host "$host" --arg port "$port" \
-                   '. += [{"protocol":$proto,"host":$host,"port":$port}]' \
-                   output/aktif/all_aktif.json > output/aktif/tmp.json && mv output/aktif/tmp.json output/aktif/all_aktif.json
-              fi
-            '
+            cat "$f" | xargs -n1 -P10 ./check_line.sh
           done
 
       - name: Push hasil ke repo
@@ -83,5 +84,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add output/aktif/
-          git commit -m "Update akun aktif besar"
+          git commit -m "Update akun aktif besar sekali run"
           git push https://$GITHUB_TOKEN@github.com/${{ github.repository }} HEAD:main
