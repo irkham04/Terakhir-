@@ -1,0 +1,62 @@
+[
+  {
+    "protocol": "vless",
+    "host": "quiz.vidio.com",
+    "port": "443",
+    "id": "f21e46d6-2162-47f5-9020-8f9eae75aeb9",
+    "alterId": "",
+    "net": "",
+    "type": "",
+    "path": "",
+    "tls": "",
+    "passwd": ""
+  },
+  {
+    "protocol": "vless",
+    "host": "quiz.vidio.com",
+    "port": "443",
+    "id": "d6a7e07e-3737-4e32-a466-80a3d1d2c669",
+    "alterId": "",
+    "net": "",
+    "type": "",
+    "path": "",
+    "tls": "",
+    "passwd": ""
+  },
+  {
+    "protocol": "vless",
+    "host": "quiz.vidio.com",
+    "port": "443",
+    "id": "0482e8ad-0eb3-4ea7-bcdb-7acc51b0cf58",
+    "alterId": "",
+    "net": "",
+    "type": "",
+    "path": "",
+    "tls": "",
+    "passwd": ""
+  },
+  {
+    "protocol": "vless",
+    "host": "quiz.vidio.com",
+    "port": "443",
+    "id": "debca0bb-c02b-4df5-9881-c96764443ee8",
+    "alterId": "",
+    "net": "",
+    "type": "",
+    "path": "",
+    "tls": "",
+    "passwd": ""
+  },
+  {
+    "protocol": "vless",
+    "host": "quiz.vidio.com",
+    "port": "443",
+    "id": "495c477f-6d24-4561-81ef-89d8f469f395",
+    "alterId": "",
+    "net": "",
+    "type": "",
+    "path": "",
+    "tls": "",
+    "passwd": ""
+  }
+]
